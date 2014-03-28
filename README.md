@@ -7,3 +7,6 @@ This project is in progress and it is not finished yet. It can be errors in the 
 So if you want to use the code of this project do it with your own risks.
 
 I suggest to use the code as reference but not as part of the code of your project.
+
+Web page of the project for more details on the whole idea:
+http://www.drones-it.com/internal-work/
