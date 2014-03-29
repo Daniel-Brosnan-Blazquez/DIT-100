@@ -1,0 +1,319 @@
+
+# Program to print the degrees of the movement of the device on each
+# reading
+
+import time
+import sys
+import signal
+import os
+import commands
+from matplotlib import pyplot
+import numpy
+sys.path.append ("../../../lib")
+import gyro
+
+FIGWIDTH = 20
+FIGHEIGTH = 10
+
+def apply_scale (value, scales):
+    
+    min_scale = scales['pos_min'][0]
+    min_vel = scales['pos_min'][1]
+    max_scale = scales['pos_max'][0]
+    max_vel = scales['pos_max'][1]
+    if value < 0:
+        min_scale = scales['neg_min'][0]
+        min_vel = scales['neg_min'][1]
+        max_scale = scales['neg_max'][0]
+        max_vel = scales['neg_max'][1]
+
+    if min_scale == None or max_scale == None:
+        return value
+
+    scale = min_scale + (value - min_vel)*((max_scale - min_scale)/(max_vel - min_vel))
+
+    if scale < 1:
+        scale = 1
+
+    return value * scale
+
+
+deg = [{},{}]
+degacum = [{},{}]
+diffvel = [{},{}]
+vel = [{},{}]
+bf_value = [{},{}]
+
+# 0 calibrated data
+# 1 raw data
+for i in xrange (2):
+    deg[i]['x'] = []
+    deg[i]['y'] = []
+    deg[i]['z'] = []
+    
+    degacum[i]['x'] = []
+    degacum[i]['y'] = []
+    degacum[i]['z'] = []
+    
+    diffvel[i]['x'] = []
+    diffvel[i]['y'] = []
+    diffvel[i]['z'] = []
+    
+    vel[i]['x'] = []
+    vel[i]['y'] = []
+    vel[i]['z'] = []
+
+    bf_value[i]['x'] = 0
+    bf_value[i]['y'] = 0
+    bf_value[i]['z'] = 0
+
+ctrl = {}
+ctrl['STOP'] = False
+ctrl['NEW_ITER'] = False
+def control_c_handler(signal, frame):
+
+    raw = raw_input ("Enter c to cancel the program or p to plot the data:")
+    if raw == 'c':
+        ctrl['STOP'] = True
+        return
+
+    if raw == 'p':
+        for axis in ['x','y','z']:
+            fig = pyplot.figure (1, figsize = (FIGWIDTH,FIGHEIGTH))
+            fig.suptitle ("Data of axis %s" % axis)
+            s1 = fig.add_subplot (411)
+            p1, = s1.plot(deg[1][axis])
+            p2, = s1.plot(deg[0][axis])
+            s1.legend ([p1,p2], ["Raw data", "Calibrated data"])
+            s1.set_title ("degrees on each instant")
+            
+            s2 = fig.add_subplot (412)
+            p1, = s2.plot(degacum[1][axis])
+            p2, = s2.plot(degacum[0][axis])
+            s2.legend ([p1,p2], ["Raw data", "Calibrated data"])
+            s2.set_title ("Degrees acumulated")
+            
+            s3 = fig.add_subplot (413)
+            p1, = s3.plot(vel[1][axis])
+            p2, = s3.plot(vel[0][axis])
+            s3.legend ([p1,p2], ["Raw data", "Calibrated data"])
+            s3.set_title ("Velocity on each instant")
+            
+            s4 = fig.add_subplot (414)
+            p1, = s4.plot(diffvel[1][axis])
+            p2, = s4.plot(diffvel[0][axis])
+            s4.legend ([p1,p2], ["Raw data", "Calibrated data"])
+            s4.set_title ("Differences on velocity between measures")
+            
+            pyplot.show ()
+            
+            pyplot.close (1)
+
+    ctrl['NEW_ITER'] = True
+
+    return
+
+
+signal.signal(signal.SIGINT, control_c_handler)
+
+# Initializing
+gyro.reset ()
+G = gyro.Init (scale = '500dps')
+if G['error'][0]:
+    print 'Failed while initializing gyro'
+    sys.exit(0)
+
+(status, message) = gyro.enable_fifo (G, True)
+if not status:
+    print message
+    sys.exit (0)
+
+(status, enable) = gyro.isenabled_fifo (G)
+if not status:
+    print enable
+    sys.exit (0)
+    
+if not enable:
+    print "Error while enabling FIFO"
+    sys.exit (0)
+
+(status, message) = gyro.set_fifomode (G, 'stream')
+if not status:
+    print message
+    sys.exit (0)
+
+(status, mode) = gyro.get_fifomode (G)
+if not status:
+    print message
+    sys.exit (0)
+
+if mode != 'stream':
+    print "Error while setting the stream mode"
+    sys.exit (0)
+
+# Get calibration data
+cal_file = "/home/pi/workspace/drones/calibration/gyro_data/cal.npz"
+cal_data = numpy.load (cal_file)
+pos_bias = {}
+neg_bias = {}
+min_gd = {}
+max_gd = {}
+[pos_bias['x'], pos_bias['y'], pos_bias['z']] = cal_data['pos_bias']
+[neg_bias['x'], neg_bias['y'], neg_bias['z']] = cal_data['neg_bias']
+[min_gd['x'], max_gd['x']] = cal_data['garbage_data'][0]
+[min_gd['y'], max_gd['y']] = cal_data['garbage_data'][1]
+[min_gd['z'], max_gd['z']] = cal_data['garbage_data'][2]
+min_cd = {}
+max_cd = {}
+[min_cd['x'], max_cd['x']] = cal_data['correct_data'][0]
+[min_cd['y'], max_cd['y']] = cal_data['correct_data'][1]
+[min_cd['z'], max_cd['z']] = cal_data['correct_data'][2]
+scales = {}
+i = 0
+for axis in ['x', 'y', 'z']:
+    scales[axis] = {}
+    scales[axis]['pos_min'] = cal_data['group_scales'][i]['pos_min_scale']
+    scales[axis]['pos_max'] = cal_data['group_scales'][i]['pos_max_scale']
+    scales[axis]['neg_min'] = cal_data['group_scales'][i]['neg_min_scale']
+    scales[axis]['neg_max'] = cal_data['group_scales'][i]['neg_max_scale']
+    
+    i += 1
+
+dt = 0.05
+dr = 1.0/95.0
+while not ctrl['STOP']:        
+    time.sleep(dt)
+
+    (status, empty) = gyro.isfifo_empty(G)
+    if not status:
+        print empty
+        sys.exit (0)
+
+    (status, full) = gyro.isfifo_full(G)
+    if not status:
+        print full
+        sys.exit (0)
+        
+    if full:
+        print "\nFIFO OVERRUN\n"
+
+    (status,level) = gyro.get_fifolevel(G)
+    if not status:
+        print level
+        sys.exit (0)
+
+    values = []
+    if ctrl['NEW_ITER']:
+        ctrl['NEW_ITER'] = False
+        deg = [{},{}]
+        degacum = [{},{}]
+        diffvel = [{},{}]
+        vel = [{},{}]
+        bf_value = [{},{}]
+        
+        for i in xrange (2):
+            deg[i]['x'] = []
+            deg[i]['y'] = []
+            deg[i]['z'] = []
+            
+            degacum[i]['x'] = []
+            degacum[i]['y'] = []
+            degacum[i]['z'] = []
+            
+            diffvel[i]['x'] = []
+            diffvel[i]['y'] = []
+            diffvel[i]['z'] = []
+            
+            vel[i]['x'] = []
+            vel[i]['y'] = []
+            vel[i]['z'] = []
+            
+            bf_value[i]['x'] = 0
+            bf_value[i]['y'] = 0
+            bf_value[i]['z'] = 0
+        
+    while not empty and level > 0:
+        (status, xyz) = gyro.get_xyz(G)
+        if not status:
+            print xyz
+            sys.exit (0)
+
+        i = 0
+        for axis in ['x', 'y', 'z']:
+            value = xyz[i]
+
+            diff = 0.0
+            garbage_data = False
+            # Detect garbage data
+            if value <= max_gd[axis] and value >= min_gd[axis]:
+                value = 0
+                garbage_data = True
+            elif value <= max_cd[axis] and value >= min_cd[axis]:
+                value = 0
+                garbage_data = True
+
+            if not garbage_data:
+                apply_sc = True
+                # Apply displacement depending on the sign of the value
+                if value < 0:
+                    value = value - neg_bias[axis]
+                    if value > 0:
+                        apply_sc = False
+                        value = -value
+                else:
+                    value = value -pos_bias[axis]
+
+                if apply_sc:
+                    value = apply_scale (value, scales[axis])
+
+            # Calibrated data
+            j = 0
+            sum_d = 0
+            if len (degacum[j][axis]) > 0:
+                sum_d = degacum[j][axis][len (degacum[j][axis])-1]
+            sum_d += value*dr;
+            vel[j][axis].append (value)
+            diffvel[j][axis].append (value-bf_value[j][axis])
+            bf_value[j][axis] = value
+            degacum[j][axis].append (sum_d)
+            deg[j][axis].append (value*dr)
+
+            # Raw data
+            value = xyz[i]
+            j = 1
+            sum_d = 0
+            if len (degacum[j][axis]) > 0:
+                sum_d = degacum[j][axis][len (degacum[j][axis])-1]
+            sum_d += value*dr;
+            vel[j][axis].append (value)
+            diffvel[j][axis].append (value-bf_value[j][axis])
+            bf_value[j][axis] = value
+            degacum[j][axis].append (sum_d)
+            deg[j][axis].append (value*dr)
+
+
+            i += 1
+
+        (status, empty) = gyro.isfifo_empty(G)
+        if not status:
+            print empty
+            sys.exit (0)
+            
+        (status, full) = gyro.isfifo_full(G)
+        if not status:
+            print full
+            sys.exit (0)
+                
+        if full:
+            print "\nFIFO OVERRUN\n"
+
+        level -= 1
+
+
+    
+    x = degacum[0]['x'][len (degacum[0]['x'])-1]
+    y = degacum[0]['y'][len (degacum[0]['y'])-1]
+    z = degacum[0]['z'][len (degacum[0]['z'])-1]
+    print("{:7.2f} {:7.2f} {:7.2f}".format(x,y,z))
+
+
